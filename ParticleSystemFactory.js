@@ -1,7 +1,21 @@
-// ParticleSystemFactory.js
+// ParticleSystemFactory.js (patched)
+// - Adds defensive shader lookups with warnings
+// - Adds console progress logs prefixed with [PSF]
+// - Ensures renderer.setRenderTarget(null) after offscreen passes (initial renderTexture and compute)
+// - Keeps original API and behavior otherwise
+
 import * as THREE from "https://esm.sh/three@0.128";
 import { GPUComputationRenderer } from "https://esm.sh/three@0.128/examples/jsm/misc/GPUComputationRenderer.js";
 import { BufferGeometryUtils } from "https://esm.sh/three@0.128/examples/jsm/utils/BufferGeometryUtils.js";
+
+function _shaderText(id) {
+  const el = document.getElementById(id);
+  if (!el) {
+    console.warn(`[PSF] missing shader element: ${id}`);
+    return ""; // return empty string so ShaderMaterial creation fails loudly later if needed
+  }
+  return el.textContent;
+}
 
 export class ParticleSystemFactory {
   constructor(renderer, { defaultWidth = 600, defaultDensity = 256 } = {}) {
@@ -20,8 +34,7 @@ export class ParticleSystemFactory {
     return inst;
   }
 
-  // New convenience: interactive picker built into the factory
-  // Returns Promise<THREE.Mesh> that resolves to a plane mesh created from 3 picked vertices
+  // Interactive picker: returns Promise<THREE.Mesh>
   pickPlaneFromScene({ camera, scene, pickableMeshes = null, maxPicks = 3, markerMaterial = null } = {}) {
     if (!this.renderer) throw new Error("ParticleSystemFactory.pickPlaneFromScene needs a valid renderer (this.renderer).");
     if (!camera || !scene) throw new Error("pickPlaneFromScene requires camera and scene.");
@@ -113,8 +126,7 @@ export class ParticleSystemFactory {
     });
   }
 
-  // New helper: create and start system from interactive pick (integrates pick + create)
-  // Returns Promise<ParticleSystemInstance>
+  // Convenience: pick + create
   async createFromPickedPlane({ camera, scene, pickableMeshes = null, particlesWidth = this.defaultWidth, densitySize = this.defaultDensity, sdfData = null, spawnScale = 0.5 } = {}) {
     const plane = await this.pickPlaneFromScene({ camera, scene, pickableMeshes });
     scene.add(plane);
@@ -124,11 +136,10 @@ export class ParticleSystemFactory {
     return system;
   }
 
-  // --- internal builder (keeps prior implementation) ---
+  // --- internal builder ---
   async _buildSystem(plane, { particlesWidth, densitySize, sdfData, spawnScale }) {
-    // Implementation adapted from your project.txt createParticles
-    // Only core parts included here: seeding, GPUComputationRenderer setup, particle material,
-    // density ping-pong RTs, and instance API. This code intentionally omits repeated comments.
+    console.log('[PSF] _buildSystem start', { particlesWidth, densitySize, hasSDF: !!sdfData });
+
     const WIDTH = particlesWidth;
     const PARTICLES = WIDTH * WIDTH;
     const gpuCompute = new GPUComputationRenderer(WIDTH, WIDTH, this.renderer);
@@ -225,9 +236,12 @@ export class ParticleSystemFactory {
       }
     }
 
-    // add variables to GPUComputationRenderer
-    const positionVariable = gpuCompute.addVariable("texturePosition", document.getElementById("texturePositionShader").textContent, posTexture);
-    const velocityVariable = gpuCompute.addVariable("textureVelocity", document.getElementById("textureVelocityShader").textContent, velTexture);
+    // add variables to GPUComputationRenderer (guarded shader lookups)
+    const texturePositionShader = _shaderText("texturePositionShader");
+    const textureVelocityShader = _shaderText("textureVelocityShader");
+
+    const positionVariable = gpuCompute.addVariable("texturePosition", texturePositionShader, posTexture);
+    const velocityVariable = gpuCompute.addVariable("textureVelocity", textureVelocityShader, velTexture);
 
     gpuCompute.setVariableDependencies(positionVariable, [positionVariable, velocityVariable]);
     gpuCompute.setVariableDependencies(velocityVariable, [positionVariable, velocityVariable]);
@@ -284,6 +298,7 @@ export class ParticleSystemFactory {
 
     const err = gpuCompute.init();
     if (err) console.error("GPUComputationRenderer.init error:", err);
+    console.log('[PSF] gpuCompute.init', { err });
 
     try {
       gpuCompute.renderTexture(posTexture, positionVariable.renderTargets[0]);
@@ -293,8 +308,13 @@ export class ParticleSystemFactory {
     } catch (e) {
       console.warn("renderTexture not available; initial textures remain in GPUCompute", e);
     }
+    console.log('[PSF] initial renderTexture done, restoring main RT', { currentRT: this.renderer.getRenderTarget() });
+    this.renderer.setRenderTarget(null);
 
-    // particle geometry & material
+    // particle geometry & material (guarded shader lookups)
+    const vertexShaderText = _shaderText("vertexShader");
+    const fragmentShaderText = _shaderText("fragmentShader");
+
     const geometry = new THREE.BufferGeometry();
     const particleUVs = new Float32Array(PARTICLES * 2);
     for (let i = 0; i < PARTICLES; i++) {
@@ -311,8 +331,8 @@ export class ParticleSystemFactory {
         uMaxAge: { value: 6.0 },
         uSpeedScale: { value: 1.5 }
       },
-      vertexShader: document.getElementById("vertexShader").textContent,
-      fragmentShader: document.getElementById("fragmentShader").textContent,
+      vertexShader: vertexShaderText,
+      fragmentShader: fragmentShaderText,
       transparent: true,
       depthTest: true
     });
@@ -332,9 +352,12 @@ export class ParticleSystemFactory {
     const densityRT = new THREE.WebGLRenderTarget(DENSITY_SIZE, DENSITY_SIZE, rtParams);
     const densityRTTemp = new THREE.WebGLRenderTarget(DENSITY_SIZE, DENSITY_SIZE, rtParams);
 
+    const splatVertex = _shaderText("densitySplatVertex");
+    const splatFragment = _shaderText("densitySplatFragment");
+
     const splatMaterial = new THREE.ShaderMaterial({
-      vertexShader: document.getElementById("densitySplatVertex").textContent,
-      fragmentShader: document.getElementById("densitySplatFragment").textContent,
+      vertexShader: splatVertex,
+      fragmentShader: splatFragment,
       uniforms: {
         uTexturePosition: { value: gpuCompute.getCurrentRenderTarget(positionVariable).texture },
         planeSize: { value: new THREE.Vector2(width, height) },
@@ -359,9 +382,13 @@ export class ParticleSystemFactory {
       -1, -1, 0, 1, -1, 0, 1, 1, 0, -1, 1, 0
     ]), 3));
     fsGeo.setIndex([0,1,2, 0,2,3]);
+
+    const fullscreenVertexText = _shaderText("fullscreenVertex");
+    const separableBlurFragmentText = _shaderText("separableBlurFragment");
+
     const blurMaterialH = new THREE.ShaderMaterial({
-      vertexShader: document.getElementById("fullscreenVertex").textContent,
-      fragmentShader: document.getElementById("separableBlurFragment").textContent,
+      vertexShader: fullscreenVertexText,
+      fragmentShader: separableBlurFragmentText,
       uniforms: { uTexture: { value: null }, uTexel: { value: new THREE.Vector2(1.0 / DENSITY_SIZE, 0.0) } },
       depthTest: false, depthWrite: false
     });
@@ -375,6 +402,8 @@ export class ParticleSystemFactory {
     velocityVariable.material.uniforms.uDensityScale = { value: 1.0 };
     velocityVariable.material.uniforms.uDensityThreshold = { value: 0.03 };
     velocityVariable.material.uniforms.uDensityTexel = { value: new THREE.Vector2(1.0 / DENSITY_SIZE, 1.0 / DENSITY_SIZE) };
+
+    console.log('[PSF] creating instance', { WIDTH, PARTICLES, DENSITY_SIZE, useFloatRT });
 
     const instance = {
       gpuCompute,
@@ -397,10 +426,15 @@ export class ParticleSystemFactory {
       positionVariable.material.uniforms.uDeltaTime.value = delta;
       velocityVariable.material.uniforms.uDeltaTime.value = delta;
 
+      if (elapsed % 1.0 < 0.016) {
+        console.log('[PSF] step heartbeat', { elapsed: Number(elapsed.toFixed(3)), delta: Number(delta.toFixed(5)) });
+      }
+
       if (instance.density) {
         const dens = instance.density;
         dens.splatMaterial.uniforms.uTexturePosition.value = gpuCompute.getCurrentRenderTarget(positionVariable).texture;
 
+        console.log('[PSF] density pass start', { beforeRT: this.renderer.getRenderTarget() });
         this.renderer.setRenderTarget(dens.rt);
         this.renderer.clear();
         this.renderer.render(dens.densityScene, dens.densityCamera);
@@ -415,13 +449,17 @@ export class ParticleSystemFactory {
         this.renderer.setRenderTarget(dens.rt);
         this.renderer.render(dens.blurScene, dens.densityCamera);
 
+        // restore and report state
         this.renderer.setRenderTarget(null);
-
+        console.log('[PSF] density pass end', { afterRT: this.renderer.getRenderTarget(), densRT: dens.rt.texture });
         velocityVariable.material.uniforms.uDensityTex.value = dens.rt.texture;
         if (instance.particleMaterial?.uniforms?.uDensityTex) instance.particleMaterial.uniforms.uDensityTex.value = dens.rt.texture;
       }
 
       gpuCompute.compute();
+      // ensure main framebuffer is restored after compute as a defensive measure
+      try { this.renderer.setRenderTarget(null); } catch(e) {}
+      console.log('[PSF] gpuCompute.compute done', { currentRT: this.renderer.getRenderTarget() });
 
       const posTex = gpuCompute.getCurrentRenderTarget(positionVariable).texture;
       const velTex = gpuCompute.getCurrentRenderTarget(velocityVariable).texture;
@@ -455,6 +493,8 @@ export class ParticleSystemFactory {
 
     instance.particleMaterial = particleMaterial;
     instance.particleGeometry = geometry;
+
+    console.log('[PSF] instance created', { particles: PARTICLES, particleMesh: particles, densityRT: instance.density?.rt });
 
     return instance;
   }
