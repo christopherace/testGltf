@@ -1,7 +1,7 @@
 // ParticleSystemFactory.js
 import * as THREE from "https://esm.sh/three@0.128";
-import { GPUComputationRenderer } from 'https://esm.sh/three@0.128/examples/jsm/misc/GPUComputationRenderer.js';
-import { BufferGeometryUtils } from 'https://esm.sh/three@0.128/examples/jsm/utils/BufferGeometryUtils.js';
+import { GPUComputationRenderer } from "https://esm.sh/three@0.128/examples/jsm/misc/GPUComputationRenderer.js";
+import { BufferGeometryUtils } from "https://esm.sh/three@0.128/examples/jsm/utils/BufferGeometryUtils.js";
 
 export class ParticleSystemFactory {
   constructor(renderer, { defaultWidth = 600, defaultDensity = 256 } = {}) {
@@ -12,32 +12,133 @@ export class ParticleSystemFactory {
     this._instances = new Set();
   }
 
-  // Create from a plane mesh. Returns Promise<ParticleSystemInstance>
-  async createFromPlane(planeMesh, {
-    particlesWidth = this.defaultWidth,
-    densitySize = this.defaultDensity,
-    sdfData = null,
-    spawnScale = 0.5
-  } = {}) {
+  // Public API unchanged: createFromPlane
+  async createFromPlane(planeMesh, { particlesWidth = this.defaultWidth, densitySize = this.defaultDensity, sdfData = null, spawnScale = 0.5 } = {}) {
     if (!planeMesh || !planeMesh.geometry) throw new Error("createFromPlane: planeMesh with geometry required");
     const inst = await this._buildSystem(planeMesh, { particlesWidth, densitySize, sdfData, spawnScale });
     this._instances.add(inst);
     return inst;
   }
 
-  // Build the system (core implementation adapted from project.txt)
+  // New convenience: interactive picker built into the factory
+  // Returns Promise<THREE.Mesh> that resolves to a plane mesh created from 3 picked vertices
+  pickPlaneFromScene({ camera, scene, pickableMeshes = null, maxPicks = 3, markerMaterial = null } = {}) {
+    if (!this.renderer) throw new Error("ParticleSystemFactory.pickPlaneFromScene needs a valid renderer (this.renderer).");
+    if (!camera || !scene) throw new Error("pickPlaneFromScene requires camera and scene.");
+
+    const ray = new THREE.Raycaster();
+    const mouse = new THREE.Vector2();
+    const picks = [];
+    const markers = [];
+    const pickMeshes = pickableMeshes || [];
+    const dom = this.renderer.domElement;
+    const markerMat = markerMaterial || new THREE.MeshBasicMaterial({ color: 0x00ff00 });
+
+    return new Promise((resolve) => {
+      function onClick(e) {
+        const rect = dom.getBoundingClientRect();
+        mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+        mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+        ray.setFromCamera(mouse, camera);
+        const intersects = ray.intersectObjects(pickMeshes, true);
+        if (!intersects.length) return;
+        const hit = intersects[0];
+        const geom = hit.object.geometry;
+        if (!geom || !geom.attributes || !geom.attributes.position) return;
+
+        // find nearest vertex in world-space to hit.point
+        const posAttr = geom.attributes.position;
+        const tmp = new THREE.Vector3();
+        let nearest = new THREE.Vector3();
+        let minD2 = Infinity;
+        for (let i = 0; i < posAttr.count; i++) {
+          tmp.fromBufferAttribute(posAttr, i).applyMatrix4(hit.object.matrixWorld);
+          const d2 = tmp.distanceToSquared(hit.point);
+          if (d2 < minD2) {
+            minD2 = d2;
+            nearest.copy(tmp);
+          }
+        }
+
+        // record pick and show marker
+        picks.push(nearest.clone());
+        const marker = new THREE.Mesh(new THREE.SphereGeometry(Math.max(0.01, hit.distance * 0.002), 8, 8), markerMat.clone());
+        marker.position.copy(nearest);
+        marker.material.depthTest = false;
+        marker.material.depthWrite = false;
+        scene.add(marker);
+        markers.push(marker);
+
+        if (picks.length >= maxPicks) {
+          // Build rectangle from 3 points: a, b, c
+          const a = picks[0], b = picks[1], c = picks[2];
+          const ab = new THREE.Vector3().subVectors(b, a);
+          const ac = new THREE.Vector3().subVectors(c, a);
+          const normal = new THREE.Vector3().crossVectors(ab, ac).normalize();
+          const u = ab.clone();
+          const v = new THREE.Vector3().crossVectors(normal, u).normalize().multiplyScalar(ac.length());
+
+          const aCorner = a.clone();
+          const bCorner = a.clone().add(u);
+          const cCorner = a.clone().add(v);
+          const dCorner = a.clone().add(u).add(v);
+
+          const verts = new Float32Array([
+            aCorner.x, aCorner.y, aCorner.z,
+            bCorner.x, bCorner.y, bCorner.z,
+            dCorner.x, dCorner.y, dCorner.z,
+            aCorner.x, aCorner.y, aCorner.z,
+            dCorner.x, dCorner.y, dCorner.z,
+            cCorner.x, cCorner.y, cCorner.z
+          ]);
+
+          const geom = new THREE.BufferGeometry();
+          geom.setAttribute('position', new THREE.BufferAttribute(verts, 3));
+          geom.computeVertexNormals();
+
+          const planeMat = new THREE.MeshBasicMaterial({ color: 0xffff00, side: THREE.DoubleSide, transparent: true, opacity: 0.6 });
+          const planeMesh = new THREE.Mesh(geom, planeMat);
+          planeMesh.name = "picked_plane_mesh";
+          planeMesh.updateMatrixWorld(true);
+
+          // cleanup markers and listeners
+          window.removeEventListener('click', onClick);
+          markers.forEach(m => { try { scene.remove(m); m.geometry?.dispose(); m.material?.dispose(); } catch(e){} });
+
+          resolve(planeMesh);
+        }
+      }
+
+      window.addEventListener('click', onClick);
+    });
+  }
+
+  // New helper: create and start system from interactive pick (integrates pick + create)
+  // Returns Promise<ParticleSystemInstance>
+  async createFromPickedPlane({ camera, scene, pickableMeshes = null, particlesWidth = this.defaultWidth, densitySize = this.defaultDensity, sdfData = null, spawnScale = 0.5 } = {}) {
+    const plane = await this.pickPlaneFromScene({ camera, scene, pickableMeshes });
+    scene.add(plane);
+    plane.updateMatrixWorld(true);
+    const system = await this.createFromPlane(plane, { particlesWidth, densitySize, sdfData, spawnScale });
+    this._instances.add(system);
+    return system;
+  }
+
+  // --- internal builder (keeps prior implementation) ---
   async _buildSystem(plane, { particlesWidth, densitySize, sdfData, spawnScale }) {
+    // Implementation adapted from your project.txt createParticles
+    // Only core parts included here: seeding, GPUComputationRenderer setup, particle material,
+    // density ping-pong RTs, and instance API. This code intentionally omits repeated comments.
     const WIDTH = particlesWidth;
     const PARTICLES = WIDTH * WIDTH;
     const gpuCompute = new GPUComputationRenderer(WIDTH, WIDTH, this.renderer);
 
-    // Utility: create empty textures
     const posTexture = gpuCompute.createTexture();
     const velTexture = gpuCompute.createTexture();
     const posArray = posTexture.image.data;
     const velArray = velTexture.image.data;
 
-    // compute plane basis and extents (world-space)
+    // compute plane basis & extents
     plane.geometry.computeBoundingBox();
     plane.updateMatrixWorld(true);
     const posAttr = plane.geometry.attributes.position;
@@ -66,11 +167,11 @@ export class ParticleSystemFactory {
 
     // extents along in-plane axes (world)
     let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
-    const tmp = new THREE.Vector3();
+    const tmpv = new THREE.Vector3();
     for (let i = 0; i < posAttr.count; i++) {
-      tmp.fromBufferAttribute(posAttr, i).applyMatrix4(plane.matrixWorld);
-      const px = tmp.dot(basisX);
-      const pz = tmp.dot(basisZ);
+      tmpv.fromBufferAttribute(posAttr, i).applyMatrix4(plane.matrixWorld);
+      const px = tmpv.dot(basisX);
+      const pz = tmpv.dot(basisZ);
       if (px < minX) minX = px; if (px > maxX) maxX = px;
       if (pz < minZ) minZ = pz; if (pz > maxZ) maxZ = pz;
     }
@@ -83,7 +184,6 @@ export class ParticleSystemFactory {
       const halfH = height * 0.5 * spawnScale;
       const baseLift = Math.max(0.01, 0.02 * spawnScale);
       const tmpPos = new THREE.Vector3();
-      let idx = 0;
       for (let i = 0; i < posArray.length; i += 4) {
         const rx = (Math.random() * 2.0 - 1.0) * halfW;
         const rz = (Math.random() * 2.0 - 1.0) * halfH;
@@ -94,8 +194,7 @@ export class ParticleSystemFactory {
         posArray[i + 0] = tmpPos.x;
         posArray[i + 1] = tmpPos.y;
         posArray[i + 2] = tmpPos.z;
-        posArray[i + 3] = 0.6 + Math.random() * 0.2; // freshness flag
-        idx++;
+        posArray[i + 3] = 0.6 + Math.random() * 0.2;
       }
     }
 
@@ -113,9 +212,8 @@ export class ParticleSystemFactory {
         velArray[i + 0] = tmpVel.x;
         velArray[i + 1] = tmpVel.y;
         velArray[i + 2] = tmpVel.z;
-        velArray[i + 3] = 0.02 + Math.random() * 0.12; // small age
+        velArray[i + 3] = 0.02 + Math.random() * 0.12;
       }
-      // safety clamp initial speeds
       const maxStartSpeed = 0.1;
       for (let i = 0; i < velArray.length; i += 4) {
         const vx = velArray[i + 0], vy = velArray[i + 1], vz = velArray[i + 2];
@@ -134,7 +232,6 @@ export class ParticleSystemFactory {
     gpuCompute.setVariableDependencies(positionVariable, [positionVariable, velocityVariable]);
     gpuCompute.setVariableDependencies(velocityVariable, [positionVariable, velocityVariable]);
 
-    // shared uniforms
     const uTime = { value: 0.0 };
     const uDeltaTime = { value: 0.0 };
     const uResolution = { value: new THREE.Vector2(WIDTH, WIDTH) };
@@ -158,7 +255,6 @@ export class ParticleSystemFactory {
       const bboxSize = sdfData.bbox.getSize(new THREE.Vector3());
       const scale = new THREE.Matrix4().makeScale(1 / bboxSize.x, 1 / bboxSize.y, 1 / bboxSize.z);
       const translate = new THREE.Matrix4().makeTranslation(-sdfData.bbox.min.x, -sdfData.bbox.min.y, -sdfData.bbox.min.z);
-      // worldToUnit = scale * translate (maps world -> [0..1] space)
       uSDFWorldToUnit.value = new THREE.Matrix4().multiplyMatrices(scale, translate);
       const voxelSize = sdfData.voxelSize !== undefined ? sdfData.voxelSize : (bboxSize.x / (sdfData.n || 32));
       uSDFCollisionThreshold.value = voxelSize * 1.0;
@@ -175,7 +271,6 @@ export class ParticleSystemFactory {
     Object.assign(positionVariable.material.uniforms, sharedUniforms);
     Object.assign(velocityVariable.material.uniforms, sharedUniforms);
 
-    // attach plane transforms
     positionVariable.material.uniforms.planeOffset = { value: planeOffset.clone() };
     positionVariable.material.uniforms.planeBasisX = { value: basisX.clone() };
     positionVariable.material.uniforms.planeBasisY = { value: basisY.clone() };
@@ -187,11 +282,9 @@ export class ParticleSystemFactory {
     velocityVariable.material.uniforms.planeBasisZ = positionVariable.material.uniforms.planeBasisZ;
     velocityVariable.material.uniforms.uMaxAge = { value: 6.0 };
 
-    // init compute
     const err = gpuCompute.init();
     if (err) console.error("GPUComputationRenderer.init error:", err);
 
-    // try to ensure render targets contain seeded data
     try {
       gpuCompute.renderTexture(posTexture, positionVariable.renderTargets[0]);
       gpuCompute.renderTexture(posTexture, positionVariable.renderTargets[1]);
@@ -201,7 +294,7 @@ export class ParticleSystemFactory {
       console.warn("renderTexture not available; initial textures remain in GPUCompute", e);
     }
 
-    // build particle geometry and material
+    // particle geometry & material
     const geometry = new THREE.BufferGeometry();
     const particleUVs = new Float32Array(PARTICLES * 2);
     for (let i = 0; i < PARTICLES; i++) {
@@ -226,7 +319,7 @@ export class ParticleSystemFactory {
 
     const particles = new THREE.Points(geometry, particleMaterial);
 
-    // DENSITY setup (ping-pong RTs + splat points + blur)
+    // density setup (ping-pong RTs + splat + blur)
     const DENSITY_SIZE = densitySize;
     const useFloatRT = this.renderer.capabilities.isWebGL2 || !!this.renderer.getContext().getExtension('EXT_color_buffer_float');
     const rtParams = {
@@ -239,7 +332,6 @@ export class ParticleSystemFactory {
     const densityRT = new THREE.WebGLRenderTarget(DENSITY_SIZE, DENSITY_SIZE, rtParams);
     const densityRTTemp = new THREE.WebGLRenderTarget(DENSITY_SIZE, DENSITY_SIZE, rtParams);
 
-    // splat material for density (uses densitySplat shaders present in document)
     const splatMaterial = new THREE.ShaderMaterial({
       vertexShader: document.getElementById("densitySplatVertex").textContent,
       fragmentShader: document.getElementById("densitySplatFragment").textContent,
@@ -259,11 +351,9 @@ export class ParticleSystemFactory {
     });
 
     const splatPoints = new THREE.Points(geometry, splatMaterial);
-    const densityScene = new THREE.Scene();
-    densityScene.add(splatPoints);
+    const densityScene = new THREE.Scene(); densityScene.add(splatPoints);
     const densityCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
 
-    // blur materials (fullscreen quad)
     const fsGeo = new THREE.BufferGeometry();
     fsGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array([
       -1, -1, 0, 1, -1, 0, 1, 1, 0, -1, 1, 0
@@ -281,13 +371,11 @@ export class ParticleSystemFactory {
     const blurMesh = new THREE.Mesh(fsGeo, blurMaterialH);
     const blurScene = new THREE.Scene(); blurScene.add(blurMesh);
 
-    // attach density uniforms to velocity shader
     velocityVariable.material.uniforms.uDensityTex = { value: null };
     velocityVariable.material.uniforms.uDensityScale = { value: 1.0 };
     velocityVariable.material.uniforms.uDensityThreshold = { value: 0.03 };
     velocityVariable.material.uniforms.uDensityTexel = { value: new THREE.Vector2(1.0 / DENSITY_SIZE, 1.0 / DENSITY_SIZE) };
 
-    // return instance object
     const instance = {
       gpuCompute,
       positionVariable,
@@ -299,35 +387,29 @@ export class ParticleSystemFactory {
         splatMaterial, splatPoints, densityScene, densityCamera,
         blurMaterialH, blurMaterialV, blurScene, blurMesh
       },
-      basisX, basisY, basisZ, planeOffset, dispose: null,
-      start: null, stop: null, updateUniforms: null
+      basisX, basisY, basisZ, planeOffset,
+      step: null, start: null, stop: null, updateUniforms: null, dispose: null
     };
 
-    // animate-step helper for this system (to be called from app's animate)
     instance.step = (elapsed, delta) => {
       positionVariable.material.uniforms.uTime.value = elapsed;
       velocityVariable.material.uniforms.uTime.value = elapsed;
       positionVariable.material.uniforms.uDeltaTime.value = delta;
       velocityVariable.material.uniforms.uDeltaTime.value = delta;
 
-      // density pass
       if (instance.density) {
         const dens = instance.density;
-        // set splat source
         dens.splatMaterial.uniforms.uTexturePosition.value = gpuCompute.getCurrentRenderTarget(positionVariable).texture;
 
-        // render splats into dens.rt
         this.renderer.setRenderTarget(dens.rt);
         this.renderer.clear();
         this.renderer.render(dens.densityScene, dens.densityCamera);
 
-        // blur horizontal -> temp
         dens.blurMaterialH.uniforms.uTexture.value = dens.rt.texture;
         dens.blurMesh.material = dens.blurMaterialH;
         this.renderer.setRenderTarget(dens.rtTemp);
         this.renderer.render(dens.blurScene, dens.densityCamera);
 
-        // blur vertical -> rt
         dens.blurMaterialV.uniforms.uTexture.value = dens.rtTemp.texture;
         dens.blurMesh.material = dens.blurMaterialV;
         this.renderer.setRenderTarget(dens.rt);
@@ -335,15 +417,12 @@ export class ParticleSystemFactory {
 
         this.renderer.setRenderTarget(null);
 
-        // bind to velocity shader
         velocityVariable.material.uniforms.uDensityTex.value = dens.rt.texture;
         if (instance.particleMaterial?.uniforms?.uDensityTex) instance.particleMaterial.uniforms.uDensityTex.value = dens.rt.texture;
       }
 
-      // compute step
       gpuCompute.compute();
 
-      // update particle material textures
       const posTex = gpuCompute.getCurrentRenderTarget(positionVariable).texture;
       const velTex = gpuCompute.getCurrentRenderTarget(velocityVariable).texture;
       if (instance.particleMaterial && instance.particleMaterial.uniforms) {
@@ -353,13 +432,11 @@ export class ParticleSystemFactory {
       }
     };
 
-    // expose control methods
     let running = false;
     instance.start = () => { running = true; };
     instance.stop = () => { running = false; };
     instance.updateUniforms = (u) => {
       Object.keys(u || {}).forEach(k => {
-        // try to find in velocity material first, then position, then particle
         if (k in velocityVariable.material.uniforms) velocityVariable.material.uniforms[k].value = u[k];
         if (k in positionVariable.material.uniforms) positionVariable.material.uniforms[k].value = u[k];
         if (instance.particleMaterial.uniforms && (k in instance.particleMaterial.uniforms)) instance.particleMaterial.uniforms[k].value = u[k];
@@ -367,29 +444,22 @@ export class ParticleSystemFactory {
     };
 
     instance.dispose = () => {
-      // remove points from scene handled by caller
-      try {
-        // dispose GPU resources
-        gpuCompute.dispose();
-      } catch(e) {}
-      // dispose materials and geometries
+      try { gpuCompute.dispose(); } catch(e){}
       try { instance.particleMaterial.dispose(); } catch(e){}
       try { geometry.dispose(); } catch(e){}
       try { densityRT.dispose(); densityRTTemp.dispose(); } catch(e){}
       try { splatMaterial.dispose(); } catch(e){}
       try { blurMaterialH.dispose(); blurMaterialV.dispose(); } catch(e){}
-      // remove references
       this._instances.delete(instance);
     };
 
-    // attach convenient references
     instance.particleMaterial = particleMaterial;
     instance.particleGeometry = geometry;
 
-    // done: return instance
     return instance;
   }
 
+  // dispose everything
   dispose() {
     for (const inst of Array.from(this._instances)) {
       try { inst.dispose(); } catch (e) {}
