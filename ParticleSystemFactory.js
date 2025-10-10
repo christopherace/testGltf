@@ -1,4 +1,4 @@
-// ParticleSystemFactory.js (patched)
+// ParticleSystemFactory.js (patched837)
 // - Adds defensive shader lookups with warnings
 // - Adds console progress logs prefixed with [PSF]
 // - Ensures renderer.setRenderTarget(null) after offscreen passes (initial renderTexture and compute)
@@ -330,8 +330,8 @@ export class ParticleSystemFactory {
       uTime: { value: 0 },
       uMaxAge: { value: 6.0 },
       uSpeedScale: { value: 1.5 },
-      uDensityTex: { value: null },     // add this
-      uDensityScale: { value: 1.0 }     // add this
+      uDensityTex: { value: null },     
+      uDensityScale: { value: 1.0 }     
     },
     vertexShader: document.getElementById("vertexShader").textContent,
     fragmentShader: document.getElementById("fragmentShader").textContent,
