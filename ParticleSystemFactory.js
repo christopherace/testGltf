@@ -324,18 +324,22 @@ export class ParticleSystemFactory {
     }
     geometry.setAttribute("particleUV", new THREE.BufferAttribute(particleUVs, 2));
     const particleMaterial = new THREE.ShaderMaterial({
-      uniforms: {
-        uTexturePosition: { value: gpuCompute.getCurrentRenderTarget(positionVariable).texture },
-        uTextureVelocity: { value: gpuCompute.getCurrentRenderTarget(velocityVariable).texture },
-        uTime: { value: 0 },
-        uMaxAge: { value: 6.0 },
-        uSpeedScale: { value: 1.5 }
-      },
-      vertexShader: vertexShaderText,
-      fragmentShader: fragmentShaderText,
-      transparent: true,
-      depthTest: true
-    });
+    uniforms: {
+      uTexturePosition: { value: gpuCompute.getCurrentRenderTarget(positionVariable).texture },
+      uTextureVelocity: { value: gpuCompute.getCurrentRenderTarget(velocityVariable).texture },
+      uTime: { value: 0 },
+      uMaxAge: { value: 6.0 },
+      uSpeedScale: { value: 1.5 },
+      uDensityTex: { value: null },     // add this
+      uDensityScale: { value: 1.0 }     // add this
+    },
+    vertexShader: document.getElementById("vertexShader").textContent,
+    fragmentShader: document.getElementById("fragmentShader").textContent,
+    transparent: true,
+    depthTest: false,   // disable for visibility
+    depthWrite: false
+  });
+
 
     const particles = new THREE.Points(geometry, particleMaterial);
 
